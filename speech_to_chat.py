@@ -34,11 +34,8 @@ class AudioTranscriber:
         self.validate_audio_device()
         self.model_name = 'medium'
         
-        # Load phrase filters from config
-        self.filtered_phrases = self.config.get('filtered_phrases', [
-            "Thanks for watching!",
-            "Like and subscribe"
-        ])
+        # Load phrase filters from config only
+        self.filtered_phrases = self.config.get('filtered_phrases', [])
         
         # Audio configuration
         self.config['sample_rate'] = 16000
@@ -271,11 +268,7 @@ class Bot(commands.Bot):
                 "sample_rate": 16000,
                 "chunk_size": 480,
                 "channels": 1,
-                "filtered_phrases": [
-                    "Thanks for watching!",
-                    "Like and subscribe",
-                    "Don't forget to subscribe"
-                ]
+                "filtered_phrases": []  # Empty list as default instead of hardcoded values
             }
         
         super().__init__(
