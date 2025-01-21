@@ -1,0 +1,10 @@
+twitchio>=2.6.0
+python-dotenv>=1.0.0
+aiohttp>=3.8.0
+openai-whisper>=20231117
+pyaudio>=0.2.13
+numpy>=1.24.0
+python-dotenv>=1.0.0
+torch>=2.0.0
+ffmpeg-python>=0.2.0
+webrtcvad>=2.0.10
