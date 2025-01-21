@@ -1,6 +1,8 @@
 from twitchio.ext import commands
 import os
-from dotenv import load_dotenv
+from typing import List, Tuple, Optional, Dict, Any
+import logging
+from pathlib import Path
 import json
 import asyncio
 import time
@@ -11,12 +13,21 @@ import torch
 import signal
 import sys
 import webrtcvad
-import collections
+from dotenv import load_dotenv
 
+# Load environment variables
 load_dotenv()
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 class AudioTranscriber:
     def __init__(self, bot, config):
+        """Initialize the audio transcriber."""
         self.bot = bot
         self.config = config
         self.p = pyaudio.PyAudio()
@@ -49,11 +60,11 @@ class AudioTranscriber:
         self.silence_frames = 0
         self.SILENCE_THRESHOLD = 20
         
-        print("Loading Whisper model...")
+        logger.info("Loading Whisper model...")
         if torch.cuda.is_available():
             try:
-                print(f"CUDA detected: {torch.cuda.get_device_name(0)}")
-                print(f"CUDA version: {torch.version.cuda}")
+                logger.info(f"CUDA detected: {torch.cuda.get_device_name(0)}")
+                logger.info(f"CUDA version: {torch.version.cuda}")
                 
                 # RTX 4090 specific optimizations
                 torch.cuda.empty_cache()
@@ -77,14 +88,14 @@ class AudioTranscriber:
                 torch.cuda.is_available = lambda: True
                 torch._C._jit_set_profiling_executor(True)
                 
-                print("\nGPU Memory Usage:")
-                print(f"Allocated: {torch.cuda.memory_allocated(0)/1024**3:.2f}GB")
-                print(f"Cached: {torch.cuda.memory_reserved(0)/1024**3:.2f}GB")
-                print(f"Max allocated: {torch.cuda.max_memory_allocated(0)/1024**3:.2f}GB")
+                logger.info("\nGPU Memory Usage:")
+                logger.info(f"Allocated: {torch.cuda.memory_allocated(0)/1024**3:.2f}GB")
+                logger.info(f"Cached: {torch.cuda.memory_reserved(0)/1024**3:.2f}GB")
+                logger.info(f"Max allocated: {torch.cuda.max_memory_allocated(0)/1024**3:.2f}GB")
                 
             except Exception as e:
-                print(f"Error configuring GPU: {e}")
-                print("Falling back to CPU...")
+                logger.error(f"Error configuring GPU: {e}")
+                logger.info("Falling back to CPU...")
                 self.model = whisper.load_model(
                     self.model_name,
                     device="cpu",
@@ -99,23 +110,23 @@ class AudioTranscriber:
 
     def validate_audio_device(self):
         """Validate the selected audio device"""
-        print("\nAvailable audio input devices:")
+        logger.info("\nAvailable audio input devices:")
         device_found = False
         
         for i in range(self.p.get_device_count()):
             dev_info = self.p.get_device_info_by_index(i)
             if dev_info['maxInputChannels'] > 0:
-                print(f"Device {i}: {dev_info['name']}")
+                logger.info(f"Device {i}: {dev_info['name']}")
                 if i == self.config['audio_device_index']:
                     device_found = True
-                    print(f"Selected device {i}: {dev_info['name']}")
+                    logger.info(f"Selected device {i}: {dev_info['name']}")
         
         if not device_found:
             raise ValueError(f"Audio device index {self.config['audio_device_index']} not found")
 
     def test_audio_levels(self, duration=3):
         """Test audio levels for the selected device"""
-        print(f"\nTesting audio levels for {duration} seconds...")
+        logger.info(f"\nTesting audio levels for {duration} seconds...")
         start_time = time.time()
         max_volume = 0
         min_volume = float('inf')
@@ -128,7 +139,7 @@ class AudioTranscriber:
             min_volume = min(min_volume, volume)
             print(f"\rVolume range: {min_volume:.0f} - {max_volume:.0f}", end='', flush=True)
         
-        print(f"\nAudio test complete. Volume range: {min_volume:.0f} - {max_volume:.0f}")
+        logger.info(f"\nAudio test complete. Volume range: {min_volume:.0f} - {max_volume:.0f}")
         return min_volume > 0 and max_volume < 32768
 
     def should_filter_phrase(self, transcription):
@@ -144,10 +155,10 @@ class AudioTranscriber:
             audio_data = audio_data.astype(np.float32) / 32768.0
             
             if len(audio_data) > self.config['sample_rate'] * 0.5:
-                print("\nProcessing audio chunk...")
+                logger.info("\nProcessing audio chunk...")
                 
                 if torch.cuda.is_available():
-                    print(f"GPU Memory before processing: {torch.cuda.memory_allocated()/1024**3:.2f}GB")
+                    logger.debug(f"GPU Memory before processing: {torch.cuda.memory_allocated()/1024**3:.2f}GB")
                     torch.cuda.empty_cache()
                     
                     options = {
@@ -167,37 +178,37 @@ class AudioTranscriber:
                         with torch.inference_mode():
                             result = self.model.transcribe(audio_data, **options)
                     
-                    print(f"GPU Memory after processing: {torch.cuda.memory_allocated()/1024**3:.2f}GB")
+                    logger.debug(f"GPU Memory after processing: {torch.cuda.memory_allocated()/1024**3:.2f}GB")
                 else:
                     with torch.inference_mode():
                         result = self.model.transcribe(audio_data, **options)
                 
                 transcription = result["text"].strip()
-                print(f"\nTranscription: {transcription}")
+                logger.info(f"\nTranscription: {transcription}")
                 
                 should_filter, matched_phrase = self.should_filter_phrase(transcription)
                 
                 if should_filter:
-                    print(f"\nFiltered out phrase containing '{matched_phrase}'")
+                    logger.info(f"\nFiltered out phrase containing '{matched_phrase}'")
                 elif transcription:
                     channel = self.bot.get_channel(os.getenv('CHANNEL'))
                     if channel:
                         await channel.send(f"{self.bot.bot_prefix}{transcription}")
                 
         except Exception as e:
-            print(f"\nError in transcription: {e}")
+            logger.error(f"\nError in transcription: {e}")
             if "CUDA out of memory" in str(e) and torch.cuda.is_available():
-                print("Attempting to recover from CUDA memory error...")
+                logger.info("Attempting to recover from CUDA memory error...")
                 torch.cuda.empty_cache()
                 await asyncio.sleep(1)
 
     async def record_and_transcribe(self):
-        print("\nRecording and transcribing... (Press Ctrl+C to stop)")
+        logger.info("\nRecording and transcribing... (Press Ctrl+C to stop)")
         
         if not self.test_audio_levels():
-            print("Warning: Audio levels may not be optimal. Please check your microphone.")
+            logger.warning("Warning: Audio levels may not be optimal. Please check your microphone.")
         
-        print("\nStarting audio processing loop...")
+        logger.info("\nStarting audio processing loop...")
         while self.is_recording:
             try:
                 # Read audio chunk
@@ -207,12 +218,12 @@ class AudioTranscriber:
                     # Check if it's speech
                     is_speech = self.vad.is_speech(data, self.config['sample_rate'])
                 except Exception as e:
-                    print(f"VAD error: {e}")
+                    logger.error(f"VAD error: {e}")
                     continue
                 
                 if is_speech:
                     if not self.is_speaking:
-                        print("\nSpeech detected")
+                        logger.info("\nSpeech detected")
                         self.is_speaking = True
                     self.buffer.append(data)
                     self.silence_frames = 0
@@ -222,7 +233,7 @@ class AudioTranscriber:
                         self.buffer.append(data)  # Keep some silence for natural speech
                         
                         if self.silence_frames >= self.SILENCE_THRESHOLD:
-                            print("\nSpeech segment complete")
+                            logger.info("\nSpeech segment complete")
                             if self.buffer:
                                 # Process the collected audio
                                 audio_segment = b''.join(self.buffer)
@@ -233,18 +244,18 @@ class AudioTranscriber:
                             self.silence_frames = 0
                 
             except Exception as e:
-                print(f"\nError in recording loop: {e}")
+                logger.error(f"\nError in recording loop: {e}")
                 await asyncio.sleep(1)
 
     def stop(self):
-        print("\nStopping audio transcription...")
+        logger.info("\nStopping audio transcription...")
         self.is_recording = False
         if hasattr(self, 'stream'):
             self.stream.stop_stream()
             self.stream.close()
         if hasattr(self, 'p'):
             self.p.terminate()
-        print("Audio transcription stopped.")
+        logger.info("Audio transcription stopped.")
 
 class Bot(commands.Bot):
     def __init__(self):
@@ -254,7 +265,7 @@ class Bot(commands.Bot):
             with open('audio_config.json', 'r') as f:
                 self.audio_config = json.load(f)
         except FileNotFoundError:
-            print("audio_config.json not found, using default values")
+            logger.warning("audio_config.json not found, using default values")
             self.audio_config = {
                 "audio_device_index": 0,
                 "sample_rate": 16000,
@@ -281,14 +292,14 @@ class Bot(commands.Bot):
         signal.signal(signal.SIGTERM, self.signal_handler)
 
     def signal_handler(self, signum, frame):
-        print("\nShutdown signal received...")
+        logger.info("\nShutdown signal received...")
         self.should_stop = True
         self.cleanup()
         sys.exit(0)
 
     async def event_ready(self):
-        print(f'Logged in as | {self.nick}')
-        print(f'Connected to channel: {os.getenv("CHANNEL")}')
+        logger.info(f'Logged in as | {self.nick}')
+        logger.info(f'Connected to channel: {os.getenv("CHANNEL")}')
         
         try:
             self.transcriber = AudioTranscriber(self, self.audio_config)
@@ -297,34 +308,34 @@ class Bot(commands.Bot):
             channel = self.get_channel(os.getenv('CHANNEL'))
             await channel.send(f"{self.bot_prefix}Connected and listening!")
         except Exception as e:
-            print(f"Error initializing transcriber: {e}")
+            logger.error(f"Error initializing transcriber: {e}")
             channel = self.get_channel(os.getenv('CHANNEL'))
             await channel.send(f"{self.bot_prefix}Failed to initialize audio transcription.")
 
     def cleanup(self):
-        print("\nCleaning up resources...")
+        logger.info("\nCleaning up resources...")
         if hasattr(self, 'transcribe_task'):
             self.transcribe_task.cancel()
         if hasattr(self, 'transcriber'):
             self.transcriber.stop()
-        print("Cleanup complete.")
+        logger.info("Cleanup complete.")
 
 async def main():
     bot = Bot()
     try:
         await bot.start()
     except KeyboardInterrupt:
-        print("\nKeyboard interrupt received...")
+        logger.info("\nKeyboard interrupt received...")
     except Exception as e:
-        print(f"Error running bot: {e}")
+        logger.error(f"Error running bot: {e}")
     finally:
         if bot:
             bot.cleanup()
-        print("Bot shutdown complete.")
+        logger.info("Bot shutdown complete.")
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        print("\nForced exit requested...")
+        logger.info("\nForced exit requested...")
         sys.exit(0)
