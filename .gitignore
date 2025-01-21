@@ -14,5 +14,4 @@ __pycache__/
 
 # Ignore the virtual environment directory
 venv/
-p2t/
-
+s2t/
