@@ -4,6 +4,11 @@
     "chunk_size": 4096,
     "channels": 1,
     "filtered_phrases": [
-        "Thanks for watching!"
-    ]
-}
+      "Thanks for watching!"
+    ],
+    "translation": {
+      "model": "nllb",
+      "fallback_model": "opus-mt",
+      "cache_dir": null
+    }
+  }
