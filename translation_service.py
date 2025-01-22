@@ -1,48 +1,8 @@
-# translation_service.py
-from typing import Optional, List, Dict, Any
+from typing import Optional, List
 from easynmt import EasyNMT
 import logging
-import json
-from pathlib import Path
 import nltk
-
-class ConfigManager:
-    """
-    Handles loading and validating configuration from JSON file.
-    """
-    def __init__(self, config_path: str = "audio_config.json"):
-        self.config_path = Path(config_path)
-        self.config = self._load_config()
-        
-    def _load_config(self) -> Dict[str, Any]:
-        """Load and validate configuration from JSON file."""
-        try:
-            with open(self.config_path, 'r') as f:
-                config = json.load(f)
-                
-            # Update config file with translation settings if they don't exist
-            config_updated = False
-            if 'translation' not in config:
-                config['translation'] = {
-                    'model': 'opus-mt',  # Changed default to opus-mt as it's more reliable
-                    'fallback_model': 'm2m100',
-                    'cache_dir': None
-                }
-                config_updated = True
-                
-            if config_updated:
-                with open(self.config_path, 'w') as f:
-                    json.dump(config, f, indent=2)
-                    
-            return config
-        except FileNotFoundError:
-            raise FileNotFoundError(f"Configuration file not found: {self.config_path}")
-        except json.JSONDecodeError:
-            raise ValueError(f"Invalid JSON in configuration file: {self.config_path}")
-
-    def get_translation_config(self) -> Dict[str, Any]:
-        """Get translation-specific configuration."""
-        return self.config.get('translation', {})
+from config_manager import ConfigManager
 
 class TranslationService:
     """
@@ -62,9 +22,13 @@ class TranslationService:
         # Initialize NLTK requirements
         self._initialize_nltk()
         
-        # Load configuration
+        # Load configuration using external ConfigManager
         self.config_manager = ConfigManager(config_path)
-        self.translation_config = self.config_manager.get_translation_config()
+        self.translation_config = self.config_manager.get('translation', {
+            'model': 'opus-mt',  # Default model if not specified
+            'fallback_model': 'm2m100',
+            'cache_dir': None
+        })
         
         # Initialize primary model
         self.model_name = self.translation_config.get('model', 'opus-mt')

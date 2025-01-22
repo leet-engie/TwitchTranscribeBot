@@ -1,22 +1,35 @@
 {
-    "audio_device_index": 9,
-    "sample_rate": 16000,
-    "chunk_size": 4096,
-    "channels": 1,
-
-    "filtered_phrases": [
-        "Thanks for watching!",
-        "Thank you for watching!"
-    ],
-
-    "translation": {
-        "model": "facebook/nllb-200-distilled-600M",
-        "fallback_model": "mbart50_m2m",
-        "cache_dir": null
-    },
-    
-    "chat_translation": {
-        "translate_to": "en",
-        "ignore_users": ["LeetEngie", "streamelements"]
+    "audio_transcriber": {
+      "device": {
+        "audio_device_index": 9,
+        "channels": 1,
+        "sample_rate": 16000,
+        "chunk_size": 480
+      },
+      "whisper": {
+        "model_name": "medium"
+      },
+      "voice_detection": {
+        "vad_mode": 2,
+        "silence_threshold": 20
+      },
+      "filtering": {
+        "filtered_phrases": [
+          "Thanks for watching!",
+          "Thank you for watching!"
+        ]
       }
-}
+    },
+    "translation": {
+      "model": "m2m_100_1.2b",
+      "fallback_model": "mbart50_m2m",
+      "cache_dir": null
+    },
+    "chat_translation": {
+      "translate_to": "en",
+      "ignore_users": [
+        "LeetEngie",
+        "streamelements"
+      ]
+    }
+  }

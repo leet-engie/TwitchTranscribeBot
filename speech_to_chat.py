@@ -7,7 +7,7 @@ import torch
 import webrtcvad
 import asyncio
 import os
-import json
+from config_manager import ConfigManager
 
 # Configure logging
 logging.basicConfig(
@@ -17,47 +17,99 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 class AudioTranscriber:
-    def __init__(self, bot):
+    def __init__(self, bot, config_path: str = "audio_config.json"):
         """Initialize the audio transcriber."""
         self.bot = bot
         self.p = pyaudio.PyAudio()
-        self.model_name = 'medium'
         
-        # Load audio configuration
-        try:
-            with open('audio_config.json', 'r') as f:
-                self.audio_config = json.load(f)
-            logger.info(f"Loaded audio configuration from audio_config.json")
-        except FileNotFoundError:
-            logger.warning("audio_config.json not found, using default values")
-            self.audio_config = {
+        # Initialize configuration using ConfigManager
+        self.config_manager = ConfigManager(config_path)
+        
+        # Define default configuration
+        default_config = {
+            "device": {
                 "audio_device_index": 0,
                 "sample_rate": 16000,
                 "chunk_size": 480,
-                "channels": 1,
+                "channels": 1
+            },
+            "whisper": {
+                "model_name": "medium"
+            },
+            "voice_detection": {
+                "vad_mode": 2,
+                "silence_threshold": 20
+            },
+            "filtering": {
                 "filtered_phrases": []
             }
+        }
         
-        # Fix sample rate and chunk size for VAD
-        self.audio_config['sample_rate'] = 16000
-        self.audio_config['chunk_size'] = 480
+        # Helper function to get config value
+        def get_config(section, key, default):
+            # First try the new nested structure
+            value = self.config_manager.get(f"audio_transcriber", {})
+            if value and isinstance(value, dict):
+                section_data = value.get(section, {})
+                if isinstance(section_data, dict):
+                    if key in section_data:
+                        return section_data[key]
+            
+            # Fallback to flat structure
+            flat_key = f"{key}"
+            value = self.config_manager.get(flat_key, default)
+            return value
         
-        # Initialize audio stream
-        self.stream = self.p.open(
-            format=pyaudio.paInt16,
-            channels=1,
-            rate=self.audio_config['sample_rate'],
-            input=True,
-            input_device_index=self.audio_config['audio_device_index'],
-            frames_per_buffer=self.audio_config['chunk_size']
-        )
+        # Initialize audio configuration
+        self.audio_config = {}
         
-        self.vad = webrtcvad.Vad(2)
+        # Device settings
+        self.audio_config['audio_device_index'] = get_config('device', 'audio_device_index', 
+            default_config['device']['audio_device_index'])
+        self.audio_config['sample_rate'] = get_config('device', 'sample_rate', 
+            default_config['device']['sample_rate'])
+        self.audio_config['chunk_size'] = get_config('device', 'chunk_size', 
+            default_config['device']['chunk_size'])
+        self.audio_config['channels'] = get_config('device', 'channels', 
+            default_config['device']['channels'])
+        
+        # Whisper settings
+        self.audio_config['model_name'] = get_config('whisper', 'model_name', 
+            default_config['whisper']['model_name'])
+        
+        # Voice detection settings
+        self.audio_config['vad_mode'] = get_config('voice_detection', 'vad_mode', 
+            default_config['voice_detection']['vad_mode'])
+        self.audio_config['silence_threshold'] = get_config('voice_detection', 'silence_threshold', 
+            default_config['voice_detection']['silence_threshold'])
+        
+        # Filtering settings
+        self.audio_config['filtered_phrases'] = get_config('filtering', 'filtered_phrases', 
+            default_config['filtering']['filtered_phrases'])
+
+        logger.info(f"Initialized with config: {self.audio_config}")
+        
+        try:
+            # Initialize audio stream with explicit type conversion
+            self.stream = self.p.open(
+                format=pyaudio.paInt16,
+                channels=int(self.audio_config['channels']),  # Ensure integer
+                rate=int(self.audio_config['sample_rate']),  # Ensure integer
+                input=True,
+                input_device_index=int(self.audio_config['audio_device_index']),  # Ensure integer
+                frames_per_buffer=int(self.audio_config['chunk_size'])  # Ensure integer
+            )
+        except Exception as e:
+            logger.error(f"Error initializing audio stream: {e}")
+            logger.error(f"Audio config used: {self.audio_config}")
+            raise
+        
+        self.vad = webrtcvad.Vad(int(self.audio_config['vad_mode']))  # Ensure integer
         self.buffer = []
         self.is_recording = True
         self.is_speaking = False
         self.silence_frames = 0
-        self.SILENCE_THRESHOLD = 20
+        self.SILENCE_THRESHOLD = int(self.audio_config['silence_threshold'])  # Ensure integer
         
         logger.info("Loading Whisper model...")
         if torch.cuda.is_available():
@@ -70,7 +122,7 @@ class AudioTranscriber:
                 torch.backends.cudnn.allow_tf32 = True
                 
                 self.model = whisper.load_model(
-                    self.model_name,
+                    self.audio_config['model_name'],
                     device="cuda",
                     download_root=os.path.expanduser("~/.cache/whisper")
                 )
@@ -79,13 +131,13 @@ class AudioTranscriber:
                 logger.error(f"Error configuring GPU: {e}")
                 logger.info("Falling back to CPU...")
                 self.model = whisper.load_model(
-                    self.model_name,
+                    self.audio_config['model_name'],
                     device="cpu",
                     download_root=os.path.expanduser("~/.cache/whisper")
                 )
         else:
             self.model = whisper.load_model(
-                self.model_name,
+                self.audio_config['model_name'],
                 device="cpu",
                 download_root=os.path.expanduser("~/.cache/whisper")
             )
@@ -95,7 +147,7 @@ class AudioTranscriber:
         if not transcription:
             return transcription
             
-        filtered_phrases = self.audio_config.get("filtered_phrases", [])
+        filtered_phrases = self.audio_config['filtered_phrases']
         filtered_text = transcription
         
         for phrase in filtered_phrases:
@@ -122,9 +174,9 @@ class AudioTranscriber:
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
                 
-                # Whisper transcription is also blocking -> do it in a thread
+                # Whisper transcription options
                 options = {
-                    "language": "en",  # Adjust if not always English
+                    "language": "en",
                     "task": "transcribe",
                     "beam_size": 5,
                     "best_of": 5,
@@ -142,7 +194,7 @@ class AudioTranscriber:
                 if transcription:
                     # Apply filtering before sending
                     filtered_transcription = self.filter_transcription(transcription)
-                    if filtered_transcription:  # Only send if there's text after filtering
+                    if filtered_transcription:
                         await self.bot.send_transcription(filtered_transcription)
                 
         except Exception as e:
@@ -173,27 +225,22 @@ class AudioTranscriber:
         """
         Continuously read audio data, run VAD, buffer speech segments, and
         submit complete speech segments to Whisper for transcription.
-        
-        By using asyncio.to_thread(...) for the blocking parts, we ensure
-        the main event loop can still process chat commands in parallel.
         """
         logger.info("Starting audio recording and transcription...")
         
-        # It's okay to do a short blocking test before we enter the loop
-        # but if you want it fully async, wrap this too
         if not self.test_audio_levels():
             logger.warning("Warning: Audio levels may not be optimal. Please check your microphone.")
         
         while self.is_recording:
             try:
-                # 1) Read from the stream in a background thread
+                # Read from the stream in a background thread
                 data = await asyncio.to_thread(
                     self.stream.read,
                     self.audio_config['chunk_size'],
                     False  # exception_on_overflow
                 )
                 
-                # 2) VAD can also be done in a thread if needed
+                # VAD can also be done in a thread if needed
                 is_speech = await asyncio.to_thread(
                     self.vad.is_speech, data, self.audio_config['sample_rate']
                 )
@@ -222,10 +269,9 @@ class AudioTranscriber:
 
             except Exception as e:
                 logger.error(f"Error in recording loop: {e}")
-                # Sleep a bit before trying to read again
                 await asyncio.sleep(1)
 
-            # Yield to the event loop briefly so other tasks can run
+            # Yield to the event loop briefly
             await asyncio.sleep(0)
 
     def stop(self):
