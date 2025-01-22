@@ -7,7 +7,7 @@
       "Thanks for watching!"
     ],
     "translation": {
-      "model": "nllb",
+      "model": "mbart50_m2m",
       "fallback_model": "opus-mt",
       "cache_dir": null
     }
