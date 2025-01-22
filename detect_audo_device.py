@@ -4,18 +4,17 @@ import numpy as np
 import json
 import time
 from pathlib import Path
+import subprocess
+import sys
+import os
+import ctypes
 
 class AudioDeviceTester:
     def __init__(self):
         # Suppress ALSA errors
-        import os
-        import sys
-        import ctypes
-        
-        # Disable ALSA error output
         ERROR_HANDLER_FUNC = ctypes.CFUNCTYPE(None, ctypes.c_char_p, ctypes.c_int,
-                                            ctypes.c_char_p, ctypes.c_int,
-                                            ctypes.c_char_p)
+                                             ctypes.c_char_p, ctypes.c_int,
+                                             ctypes.c_char_p)
 
         def py_error_handler(filename, line, function, err, fmt):
             pass
@@ -35,6 +34,15 @@ class AudioDeviceTester:
         self.channels = 1
         self.test_duration = 5  # seconds
         
+        # Path to the helper script
+        self.helper_script = Path(__file__).parent / "validate_device.py"
+        if not self.helper_script.exists():
+            print(f"Helper script not found at {self.helper_script}")
+            sys.exit(1)
+        
+        # Initialize list to store compatible devices
+        self.compatible_devices = []
+    
     def display_menu(self):
         """Display the main menu options."""
         print("\n" + "="*50)
@@ -63,46 +71,46 @@ class AudioDeviceTester:
                     input_devices.append(device_info)
                     print(f"📍 Device [{i}]: {device_info['name']}")
                     print(f"   ├── Channels: {device_info['maxInputChannels']}")
-                    print(f"   └── Sample Rate: {int(device_info['defaultSampleRate'])} Hz")
+                    sample_rate_display = int(device_info['defaultSampleRate']) if device_info['defaultSampleRate'] else "Unknown"
+                    print(f"   └── Sample Rate: {sample_rate_display} Hz")
                     print("-" * 60)
         
         if not found_devices:
             print("❌ No compatible audio input devices found!")
             print("=" * 60)
-            
+        else:
+            self.compatible_devices = input_devices  # Store the list for future use
+        
         return input_devices
 
     def validate_device(self, device_info):
-        """Test if a device can be opened with our required configuration."""
-        import os
-        import sys
-        import tempfile
-
-        # Redirect stderr to devnull temporarily
-        stderr = sys.stderr
-        devnull = open(os.devnull, 'w')
-        sys.stderr = devnull
-
-        try:
-            stream = self.p.open(
-                format=pyaudio.paInt16,
-                channels=self.channels,
-                rate=self.sample_rate,
-                input=True,
-                input_device_index=device_info['index'],
-                frames_per_buffer=self.chunk_size
-            )
-            stream.stop_stream()
-            stream.close()
-            result = True
-        except Exception:
-            result = False
+        """Check if the device supports the required sample rate using a subprocess."""
+        device_index = device_info['index']
+        required_rate = self.sample_rate
+        alternative_rates = [44100, 48000]
         
-        # Restore stderr
-        sys.stderr = stderr
-        devnull.close()
+        # Define sample rates to test
+        rates_to_test = [required_rate] + alternative_rates
         
-        return result
+        for rate in rates_to_test:
+            try:
+                result = subprocess.run(
+                    [sys.executable, str(self.helper_script), str(device_index), str(rate), str(self.channels)],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    timeout=2
+                )
+                output = result.stdout.decode().strip()
+                if output == "Supported":
+                    return True
+            except subprocess.TimeoutExpired:
+                print(f"Validation for device {device_index} at {rate} Hz timed out.")
+                continue
+            except Exception as e:
+                print(f"Error validating device {device_index} at {rate} Hz: {e}")
+                continue
+        
+        return False
 
     def calculate_audio_metrics(self, audio_data):
         """Calculate various audio quality metrics."""
@@ -167,10 +175,14 @@ class AudioDeviceTester:
         print(f"Please speak continuously for {self.test_duration} seconds...")
         
         try:
+            device_info = self.p.get_device_info_by_index(device_index)
+            device_rate = int(device_info['defaultSampleRate']) if device_info['defaultSampleRate'] else self.sample_rate
+            
+            # Open stream at device's native rate
             stream = self.p.open(
                 format=pyaudio.paInt16,
                 channels=self.channels,
-                rate=self.sample_rate,
+                rate=device_rate,
                 input=True,
                 input_device_index=device_index,
                 frames_per_buffer=self.chunk_size
@@ -184,9 +196,23 @@ class AudioDeviceTester:
                 data = stream.read(self.chunk_size, exception_on_overflow=False)
                 audio_data.append(np.frombuffer(data, dtype=np.int16))
 
+            # Close stream
+            stream.stop_stream()
+            stream.close()
+            
             # Process audio data
             audio_data = np.concatenate(audio_data)
             audio_float = audio_data.astype(np.float32) / 32768.0
+            
+            # Resample if necessary
+            if device_rate != self.sample_rate:
+                try:
+                    import librosa
+                except ImportError:
+                    print("librosa not installed. Installing now...")
+                    subprocess.check_call([sys.executable, "-m", "pip", "install", "librosa"])
+                    import librosa
+                audio_float = librosa.resample(audio_float, orig_sr=device_rate, target_sr=self.sample_rate)
             
             # Calculate metrics
             metrics = self.calculate_audio_metrics(audio_float)
@@ -199,9 +225,6 @@ class AudioDeviceTester:
             
             # Calculate quality score
             quality_results = self.score_device(metrics, transcription)
-            
-            stream.stop_stream()
-            stream.close()
             
             return True, quality_results, transcription
             
@@ -271,34 +294,29 @@ class AudioDeviceTester:
 
     def test_all_devices(self):
         """Run the optimal device test on all compatible devices."""
-        print("\nScanning and testing all compatible audio devices...")
-        valid_devices = []
+        print("\nRunning optimal device test on all compatible devices...")
         device_scores = {}
         
-        # First pass: find valid devices
-        for i in range(self.p.get_device_count()):
-            device_info = self.p.get_device_info_by_index(i)
-            if device_info['maxInputChannels'] > 0 and self.validate_device(device_info):
-                valid_devices.append(device_info)
-        
-        if not valid_devices:
-            print("No compatible input devices found!")
+        if not self.compatible_devices:
+            print("No compatible devices to test. Please list devices first.")
             return
         
-        print("\nFound compatible devices. Let's test each one:")
-        
-        # Test each valid device
-        for device_info in valid_devices:
+        for device_info in self.compatible_devices:
+            device_index = device_info['index']
             print(f"\n{'-'*50}")
-            print(f"Testing device: {device_info['name']} (index: {device_info['index']})")
-            success, quality_results, transcription = self.test_device(device_info['index'])
+            print(f"Testing device: {device_info['name']} (index: {device_index})")
+            success, quality_results, transcription = self.test_device(device_index)
             
             if success:
-                device_scores[device_info['index']] = {
+                device_scores[device_index] = {
                     'name': device_info['name'],
                     'score': quality_results,
                     'transcription': transcription
                 }
+        
+        if not device_scores:
+            print("\nNo devices passed the tests.")
+            return
         
         # Display results
         print("\n" + "="*50)
@@ -321,28 +339,27 @@ class AudioDeviceTester:
             print("-"*50)
         
         # Recommend best device
-        if sorted_devices:
-            best_device = sorted_devices[0]
-            print(f"\nRECOMMENDED DEVICE: {best_device[1]['name']} (index: {best_device[0]})")
-            print(f"Score: {best_device[1]['score']['percentage']:.1f}%")
-            
-            use_recommended = input("\nWould you like to use the recommended device? (yes/no): ").lower()
-            if use_recommended.startswith('y'):
-                self.save_config(best_device[0])
-            else:
-                # Let user choose from tested devices
-                while True:
-                    try:
-                        choice = int(input("\nEnter the index of the device you want to use (-1 to exit): "))
-                        if choice == -1:
-                            break
-                        if choice in device_scores:
-                            self.save_config(choice)
-                            break
-                        else:
-                            print("Invalid device index. Please choose from the tested devices.")
-                    except ValueError:
-                        print("Please enter a valid number!")
+        best_device = sorted_devices[0]
+        print(f"\nRECOMMENDED DEVICE: {best_device[1]['name']} (index: {best_device[0]})")
+        print(f"Score: {best_device[1]['score']['percentage']:.1f}%")
+        
+        use_recommended = input("\nWould you like to use the recommended device? (yes/no): ").lower()
+        if use_recommended.startswith('y'):
+            self.save_config(best_device[0])
+        else:
+            # Let user choose from tested devices
+            while True:
+                try:
+                    choice = int(input("\nEnter the index of the device you want to use (-1 to exit): "))
+                    if choice == -1:
+                        break
+                    if choice in device_scores:
+                        self.save_config(choice)
+                        break
+                    else:
+                        print("Invalid device index. Please choose from the tested devices.")
+                except ValueError:
+                    print("Please enter a valid number!")
 
     def run(self):
         """Main program loop with menu options."""
@@ -371,14 +388,6 @@ class AudioDeviceTester:
                         if not any(d['index'] == device_index for d in devices):
                             print("Invalid device number!")
                             time.sleep(1.5)
-                            continue
-                            
-                        if not self.validate_device(self.p.get_device_info_by_index(device_index)):
-                            print("\nThis device is not compatible with the required configuration:")
-                            print(f"- Sample rate: {self.sample_rate} Hz")
-                            print(f"- Channels: {self.channels}")
-                            print("Please try another device.")
-                            time.sleep(2)
                             continue
                             
                         self.test_single_device(device_index)

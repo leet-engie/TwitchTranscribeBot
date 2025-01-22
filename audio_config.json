@@ -1,14 +1,15 @@
 {
-    "audio_device_index": 13,
+    "audio_device_index": 9,
     "sample_rate": 16000,
     "chunk_size": 4096,
     "channels": 1,
     "filtered_phrases": [
-      "Thanks for watching!"
+        "Thanks for watching!",
+        "Thank you for watching!"
     ],
     "translation": {
-      "model": "mbart50_m2m",
-      "fallback_model": "opus-mt",
-      "cache_dir": null
+        "model": "mbart50_m2m",
+        "fallback_model": "opus-mt",
+        "cache_dir": null
     }
-  }
+}

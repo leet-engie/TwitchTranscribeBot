@@ -76,21 +76,6 @@ class ChatManager(commands.Bot):
             if code in self.translation_service.available_languages
         ])
 
-    def chunk_message(self, content: str, max_len: int = 500) -> list[str]:
-        """
-        Helper method to split a long message into <= max_len pieces.
-        Twitch enforces a 500-character limit per message.
-        """
-        # We don't want to break mid-word if possible, but simplest approach is just a raw slice
-        # For a more advanced approach, you could split by spaces near max_len
-        chunks = []
-        start = 0
-        while start < len(content):
-            chunk = content[start:start+max_len]
-            chunks.append(chunk)
-            start += max_len
-        return chunks
-
     def signal_handler(self, signum, frame):
         """Handle shutdown signals gracefully."""
         logger.info("Shutdown signal received...")
@@ -153,16 +138,11 @@ class ChatManager(commands.Bot):
             await ctx.send(f"{self.bot_prefix}Translation service is not available.")
             return
 
-        # 1) Send common examples
+        # Send common examples
         common_examples = self.get_language_examples()
         await ctx.send(f"{self.bot_prefix}Common language codes: {common_examples}")
 
-        # 3) Split into multiple <=500-char chunks, then send each
-        chunks = self.chunk_message(full_list_str, max_len=500)
-        for chunk in chunks:
-            await ctx.send(chunk)
-
-        # 4) Final usage note
+        # Final usage note
         await ctx.send(f"{self.bot_prefix}Use these codes with the !translate command (e.g., !translate es)")
 
     @commands.command(name='speech')
