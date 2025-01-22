@@ -5,7 +5,6 @@ import pyaudio
 import numpy as np
 import torch
 import webrtcvad
-from typing import Optional
 import asyncio
 import os
 import json
@@ -39,7 +38,7 @@ class AudioTranscriber:
                 "filtered_phrases": []
             }
         
-        # Set fixed sample rate and chunk size for VAD
+        # Fix sample rate and chunk size for VAD
         self.audio_config['sample_rate'] = 16000
         self.audio_config['chunk_size'] = 480
         
@@ -91,8 +90,70 @@ class AudioTranscriber:
                 download_root=os.path.expanduser("~/.cache/whisper")
             )
 
-    def test_audio_levels(self, duration=3):
-        """Test audio levels for the selected device"""
+    def filter_transcription(self, transcription: str) -> str:
+        """Filter out unwanted phrases from transcription."""
+        if not transcription:
+            return transcription
+            
+        filtered_phrases = self.audio_config.get("filtered_phrases", [])
+        filtered_text = transcription
+        
+        for phrase in filtered_phrases:
+            if phrase in filtered_text:
+                filtered_text = filtered_text.replace(phrase, "").strip()
+                logger.debug(f"Filtered out phrase: {phrase}")
+                
+        return filtered_text
+
+    async def process_audio_chunk(self, audio_data: bytes):
+        """
+        Processes a chunk of audio by calling Whisper in a separate thread,
+        then sends the resulting transcription to the bot if not empty.
+        """
+        try:
+            # Convert raw audio data to float32
+            audio_np = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32) / 32768.0
+            
+            # Only process if it's at least half a second of audio
+            if len(audio_np) > self.audio_config['sample_rate'] * 0.5:
+                logger.debug("Processing audio chunk...")
+                
+                # Free up some GPU memory if available
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                
+                # Whisper transcription is also blocking -> do it in a thread
+                options = {
+                    "language": "en",  # Adjust if not always English
+                    "task": "transcribe",
+                    "beam_size": 5,
+                    "best_of": 5,
+                    "fp16": torch.cuda.is_available(),
+                    "temperature": [0.0, 0.2, 0.4, 0.6],
+                    "compression_ratio_threshold": 2.4,
+                    "condition_on_previous_text": True,
+                    "initial_prompt": None
+                }
+                
+                # Offload the transcribe call to a thread
+                result = await asyncio.to_thread(self.model.transcribe, audio_np, **options)
+                
+                transcription = result["text"].strip()
+                if transcription:
+                    # Apply filtering before sending
+                    filtered_transcription = self.filter_transcription(transcription)
+                    if filtered_transcription:  # Only send if there's text after filtering
+                        await self.bot.send_transcription(filtered_transcription)
+                
+        except Exception as e:
+            logger.error(f"Error in transcription: {e}")
+            if "CUDA out of memory" in str(e) and torch.cuda.is_available():
+                logger.info("Attempting to recover from CUDA memory error...")
+                torch.cuda.empty_cache()
+                await asyncio.sleep(1)
+
+    def test_audio_levels(self, duration=3) -> bool:
+        """Test audio levels for the selected device (blocking)."""
         logger.info(f"Testing audio levels for {duration} seconds...")
         start_time = time.time()
         max_volume = 0
@@ -108,58 +169,34 @@ class AudioTranscriber:
         logger.info(f"Audio test complete. Volume range: {min_volume:.0f} - {max_volume:.0f}")
         return bool(min_volume > 0 and max_volume < 32768)
 
-    async def process_audio_chunk(self, audio_data):
-        try:
-            audio_data = np.frombuffer(audio_data, dtype=np.int16)
-            audio_data = audio_data.astype(np.float32) / 32768.0
-            
-            if len(audio_data) > self.audio_config['sample_rate'] * 0.5:
-                logger.debug("Processing audio chunk...")
-                
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-                    
-                options = {
-                    "language": "en",
-                    "task": "transcribe",
-                    "beam_size": 5,
-                    "best_of": 5,
-                    "fp16": torch.cuda.is_available(),
-                    "temperature": [0.0, 0.2, 0.4, 0.6],
-                    "compression_ratio_threshold": 2.4,
-                    "condition_on_previous_text": True,
-                    "initial_prompt": None
-                }
-                
-                with torch.inference_mode():
-                    result = self.model.transcribe(audio_data, **options)
-                
-                transcription = result["text"].strip()
-                if transcription:
-                    await self.bot.send_transcription(transcription)
-                
-        except Exception as e:
-            logger.error(f"Error in transcription: {e}")
-            if "CUDA out of memory" in str(e) and torch.cuda.is_available():
-                logger.info("Attempting to recover from CUDA memory error...")
-                torch.cuda.empty_cache()
-                await asyncio.sleep(1)
-
     async def record_and_transcribe(self):
+        """
+        Continuously read audio data, run VAD, buffer speech segments, and
+        submit complete speech segments to Whisper for transcription.
+        
+        By using asyncio.to_thread(...) for the blocking parts, we ensure
+        the main event loop can still process chat commands in parallel.
+        """
         logger.info("Starting audio recording and transcription...")
         
+        # It's okay to do a short blocking test before we enter the loop
+        # but if you want it fully async, wrap this too
         if not self.test_audio_levels():
             logger.warning("Warning: Audio levels may not be optimal. Please check your microphone.")
         
         while self.is_recording:
             try:
-                data = self.stream.read(self.audio_config['chunk_size'], exception_on_overflow=False)
+                # 1) Read from the stream in a background thread
+                data = await asyncio.to_thread(
+                    self.stream.read,
+                    self.audio_config['chunk_size'],
+                    False  # exception_on_overflow
+                )
                 
-                try:
-                    is_speech = self.vad.is_speech(data, self.audio_config['sample_rate'])
-                except Exception as e:
-                    logger.error(f"VAD error: {e}")
-                    continue
+                # 2) VAD can also be done in a thread if needed
+                is_speech = await asyncio.to_thread(
+                    self.vad.is_speech, data, self.audio_config['sample_rate']
+                )
                 
                 if is_speech:
                     if not self.is_speaking:
@@ -182,18 +219,22 @@ class AudioTranscriber:
                             self.buffer = []
                             self.is_speaking = False
                             self.silence_frames = 0
-                
+
             except Exception as e:
                 logger.error(f"Error in recording loop: {e}")
+                # Sleep a bit before trying to read again
                 await asyncio.sleep(1)
+
+            # Yield to the event loop briefly so other tasks can run
+            await asyncio.sleep(0)
 
     def stop(self):
         """Stop the audio transcription service."""
         logger.info("Stopping audio transcription...")
         self.is_recording = False
-        if hasattr(self, 'stream'):
+        if hasattr(self, 'stream') and self.stream is not None:
             self.stream.stop_stream()
             self.stream.close()
-        if hasattr(self, 'p'):
+        if hasattr(self, 'p') and self.p is not None:
             self.p.terminate()
         logger.info("Audio transcription stopped.")
