@@ -53,7 +53,7 @@ async def test_command_languages_with_mocked_service(mocker):
     
     # Create a list of expected calls that match the actual implementation
     expected_calls = [
-        mocker.call("[🤖]: Common language codes: es (Spanish), fr (French)"),
+        mocker.call("[🤖]: Common language codes: es (Español), fr (Français)"),
         mocker.call("[🤖]: Use these codes with the !translate command (e.g., !translate es)")
     ]
     

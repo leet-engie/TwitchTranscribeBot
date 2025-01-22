@@ -72,17 +72,17 @@ class ChatManager(commands.Bot):
         if not self.translation_service:
             return ""
         common_languages = {
-            'es': 'Spanish',
-            'fr': 'French',
-            'de': 'German',
-            'pt': 'Portugese',
-            'it': 'Italian',
-            'pl': 'Polish',
-            'nl': 'Dutch',
-            'ko': 'Korean',
-            'ru': 'Russian',
-            'zh': 'Chinese',
-            'ja': 'Japanese'
+            'es': 'Español',
+            'fr': 'Français',
+            'de': 'Deutsch',
+            'pt': 'Português',
+            'it': 'Italiano',
+            'pl': 'Polski',
+            'nl': 'Nederlands',
+            'ko': '한국어',
+            'ru': 'Русский',
+            'zh': '中文',
+            'ja': '日本語'
         }
         return ", ".join([
             f"{code} ({name})" for code, name in common_languages.items()
