@@ -6,7 +6,7 @@ import signal
 import sys
 from typing import Optional, Dict
 from dotenv import load_dotenv
-from translation_service import TranslationService
+from translation_service import TranslationService, ConfigManager
 
 # Load environment variables
 load_dotenv()
@@ -45,6 +45,19 @@ class ChatManager(commands.Bot):
         self.should_stop = False
         signal.signal(signal.SIGINT, self.signal_handler)
         signal.signal(signal.SIGTERM, self.signal_handler)
+
+        # Load configuration
+        try:
+            self.config_manager = ConfigManager()
+            self.chat_translation_config = self.config_manager.config.get('chat_translation', {})
+            self.translate_chat_to = self.chat_translation_config.get('translate_to')
+            self.ignore_users = set(username.lower() for username in self.chat_translation_config.get('ignore_users', []))
+            self.chat_translation_enabled = False
+        except Exception as e:
+            logger.error(f"Failed to load chat translation configuration: {e}")
+            self.translate_chat_to = None
+            self.ignore_users = set()
+            self.chat_translation_enabled = False
 
         # Initialize translation service
         try:
@@ -95,6 +108,7 @@ class ChatManager(commands.Bot):
         await channel.send(f"{self.bot_prefix}!translate <code> - Start translation to specified language (can enable multiple)")
         await channel.send(f"{self.bot_prefix}!stoptranslate <code> - Stop translation for that language")
         await channel.send(f"{self.bot_prefix}!languages - List supported language codes")
+        await channel.send(f"{self.bot_prefix}!translatechat - Toggle automatic chat translation")
 
     async def event_message(self, message):
         """Handle incoming messages."""
@@ -103,9 +117,65 @@ class ChatManager(commands.Bot):
 
         # Log incoming messages
         logger.debug(f'{message.author.name}: {message.content}')
+
+        # Handle chat translation if enabled
+        if self.chat_translation_enabled and self.translation_service and message.content and not message.content.startswith('!'):
+            await self.handle_chat_translation(message)
         
         # Handle commands
         await self.handle_commands(message)
+
+    async def handle_chat_translation(self, message):
+        """Handle translation of chat messages."""
+        try:
+            # Skip messages from ignored users
+            if message.author.name.lower() in self.ignore_users:
+                return
+
+            try:
+                # For English target, always try to translate from Spanish first
+                if self.translate_chat_to == 'en':
+                    translated_text = self.translation_service.translate(
+                        message.content,
+                        source_lang='es',  # Assume Spanish as source for English target
+                        target_lang='en'
+                    )
+                else:
+                    # For other targets, try auto-detection first
+                    translated_text = self.translation_service.model.translate(
+                        message.content,
+                        target_lang=self.translate_chat_to
+                    )
+                
+                # Remove punctuation and extra spaces for comparison
+                cleaned_original = ' '.join(message.content.lower().split())
+                cleaned_translation = ' '.join(translated_text.lower().split())
+                
+                # Only send if translation is meaningfully different
+                if cleaned_translation != cleaned_original:
+                    channel = self.get_channel(os.getenv('CHANNEL'))
+                    await channel.send(f"{self.bot_prefix}[{message.author.name}][{self.translate_chat_to}]: {translated_text}")
+
+            except Exception as translate_error:
+                logger.debug(f"Primary translation attempt failed: {translate_error}")
+                # If primary translation fails, try alternate source language
+                try:
+                    source_lang = 'es' if self.translate_chat_to == 'en' else 'en'
+                    translated_text = self.translation_service.translate(
+                        message.content,
+                        source_lang=source_lang,
+                        target_lang=self.translate_chat_to
+                    )
+                    
+                    if translated_text.lower() != message.content.lower():
+                        channel = self.get_channel(os.getenv('CHANNEL'))
+                        await channel.send(f"{self.bot_prefix}[{message.author.name}][{self.translate_chat_to}]: {translated_text}")
+                        
+                except Exception as fallback_error:
+                    logger.error(f"Translation fallback error: {fallback_error}")
+
+        except Exception as e:
+            logger.error(f"Error in chat translation: {e}")
 
     async def send_transcription(self, text: str):
         """
@@ -144,6 +214,21 @@ class ChatManager(commands.Bot):
 
         # Final usage note
         await ctx.send(f"{self.bot_prefix}Use these codes with the !translate command (e.g., !translate es)")
+
+    @commands.command(name='translatechat')
+    async def translatechat_command(self, ctx: commands.Context):
+        """Toggle automatic chat translation."""
+        if not self.translation_service:
+            await ctx.send(f"{self.bot_prefix}Translation service is not available.")
+            return
+
+        if not self.translate_chat_to:
+            await ctx.send(f"{self.bot_prefix}Chat translation target language not configured in audio_config.json")
+            return
+
+        self.chat_translation_enabled = not self.chat_translation_enabled
+        status = "enabled" if self.chat_translation_enabled else "disabled"
+        await ctx.send(f"{self.bot_prefix}Chat translation {status} (Target language: {self.translate_chat_to})")
 
     @commands.command(name='speech')
     async def speech_command(self, ctx: commands.Context):

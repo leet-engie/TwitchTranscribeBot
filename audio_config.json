@@ -11,5 +11,9 @@
         "model": "mbart50_m2m",
         "fallback_model": "opus-mt",
         "cache_dir": null
-    }
+    },
+    "chat_translation": {
+        "translate_to": "en",
+        "ignore_users": ["LeetEngie", "streamelements"]
+      }
 }
