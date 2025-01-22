@@ -146,16 +146,16 @@ class AudioTranscriber:
         """Filter out unwanted phrases from transcription."""
         if not transcription:
             return transcription
-            
+                
         filtered_phrases = self.audio_config['filtered_phrases']
         filtered_text = transcription
-        
+            
         for phrase in filtered_phrases:
             if phrase in filtered_text:
-                filtered_text = filtered_text.replace(phrase, "").strip()
-                logger.debug(f"Filtered out phrase: {phrase}")
+                filtered_text = filtered_text.replace(phrase, "")
                 
-        return filtered_text
+        # Normalize spaces after filtering
+        return ' '.join(filtered_text.split())
 
     async def process_audio_chunk(self, audio_data: bytes):
         """

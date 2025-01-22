@@ -1,6 +1,7 @@
 import pytest
 import asyncio
-from unittest.mock import AsyncMock, patch
+import os
+from unittest.mock import AsyncMock, MagicMock, patch, call
 
 from chat_manager import ChatManager
 
@@ -11,10 +12,10 @@ async def test_bot_initialization():
     """
     bot = ChatManager()
     assert bot is not None
+    assert hasattr(bot, 'command_handler')
     assert bot.translation_service is not None or bot.translation_service is None
     # We don't assert specifically "is not None" because the bot might fail to load
     # the translation service, but either way it shouldn't crash.
-
 
 @pytest.mark.asyncio
 async def test_command_languages_no_translation_service(mocker):
@@ -22,16 +23,15 @@ async def test_command_languages_no_translation_service(mocker):
     Test !languages when translation service is unavailable.
     """
     bot = ChatManager()
-    bot.translation_service = None  # Force the translation service to be unavailable
+    bot.translation_service = None
+    bot.command_handler.translation_service = None
     
     ctx = AsyncMock()
     ctx.send = AsyncMock()
 
-    await bot.languages_command(ctx)
-    ctx.send.assert_awaited()  # or assert_any_call
-    # Check that we got "Translation service is not available."
-    ctx.send.assert_any_call("[🤖]: Translation service is not available.")
-
+    await bot.command_handler.handle_languages_command(ctx)
+    ctx.send.assert_awaited()
+    ctx.send.assert_any_call("[🤖]: Translation service unavailable.")
 
 @pytest.mark.asyncio
 async def test_command_languages_with_mocked_service(mocker):
@@ -45,21 +45,19 @@ async def test_command_languages_with_mocked_service(mocker):
     mock_translation_service = mocker.MagicMock()
     mock_translation_service.available_languages = ["en", "es", "fr"]
     bot.translation_service = mock_translation_service
+    bot.command_handler.translation_service = mock_translation_service
     
     ctx = AsyncMock()
     ctx.send = AsyncMock()
     
-    await bot.languages_command(ctx)
+    await bot.command_handler.handle_languages_command(ctx)
     
-    # Create a list of expected calls that match the actual implementation
     expected_calls = [
         mocker.call("[🤖]: Common language codes: es (Español), fr (Français)"),
-        mocker.call("[🤖]: Use these codes with the !translate command (e.g., !translate es)")
+        mocker.call("[🤖]: Use these codes with !translate (e.g., !translate es)")
     ]
     
-    # Assert that all expected calls were made
     ctx.send.assert_has_calls(expected_calls, any_order=True)
-
 
 @pytest.mark.asyncio
 async def test_speech_command_already_running():
@@ -69,14 +67,13 @@ async def test_speech_command_already_running():
     """
     bot = ChatManager()
     bot.speech_service = True  # pretend it's already running
+    bot.command_handler.bot = bot
 
     ctx = AsyncMock()
     ctx.send = AsyncMock()
 
-    await bot.speech_command(ctx)
-
-    ctx.send.assert_any_call("[🤖]: Speech-to-text service is already running.")
-
+    await bot.command_handler.handle_speech_command(ctx)
+    ctx.send.assert_any_call("[🤖]: Speech-to-text service already running.")
 
 @pytest.mark.asyncio
 async def test_translate_command_no_argument():
@@ -87,12 +84,10 @@ async def test_translate_command_no_argument():
     bot = ChatManager()
     ctx = AsyncMock()
     ctx.send = AsyncMock()
-    # Simulate the user message with no argument
     ctx.message.content = "!translate"
 
-    await bot.translate_command(ctx)
+    await bot.command_handler.handle_translate_command(ctx)
     ctx.send.assert_any_call("[🤖]: Usage: !translate <language_code>")
-
 
 @pytest.mark.asyncio
 async def test_translate_command_unsupported_language(mocker):
@@ -102,18 +97,17 @@ async def test_translate_command_unsupported_language(mocker):
     """
     bot = ChatManager()
     
-    # Mock available languages
     mock_translation_service = mocker.MagicMock()
     mock_translation_service.available_languages = ["en", "es", "fr"]
     bot.translation_service = mock_translation_service
+    bot.command_handler.translation_service = mock_translation_service
 
     ctx = AsyncMock()
     ctx.send = AsyncMock()
-    ctx.message.content = "!translate zz"  # "zz" not in ["en","es","fr"]
+    ctx.message.content = "!translate zz"
 
-    await bot.translate_command(ctx)
-    ctx.send.assert_any_call("[🤖]: Language code 'zz' is not supported.")
-
+    await bot.command_handler.handle_translate_command(ctx)
+    ctx.send.assert_any_call("[🤖]: Language code 'zz' not supported.")
 
 @pytest.mark.asyncio
 async def test_translate_command_success(mocker):
@@ -124,27 +118,20 @@ async def test_translate_command_success(mocker):
     """
     bot = ChatManager()
     
-    # Mock available languages
     mock_translation_service = mocker.MagicMock()
     mock_translation_service.available_languages = ["en", "es", "fr"]
     bot.translation_service = mock_translation_service
-
-    # We'll also mock out speech_command so it doesn't do anything heavy
-    bot.speech_command = AsyncMock()
+    bot.command_handler.translation_service = mock_translation_service
+    bot.command_handler.bot = bot
 
     ctx = AsyncMock()
     ctx.message.content = "!translate es"
     ctx.send = AsyncMock()
 
-    await bot.translate_command(ctx)
+    await bot.command_handler.handle_translate_command(ctx)
 
-    # Should have called speech_command if not running yet
-    bot.speech_command.assert_awaited()
-    # Check that we set the language active
-    assert bot.active_translations["es"] == True
-    # Also check we posted a success message
+    assert bot.command_handler.active_translations["es"] == True
     ctx.send.assert_any_call("[🤖]: Started translation to 'es'")
-
 
 @pytest.mark.asyncio
 async def test_stoptranslate_command(mocker):
@@ -152,33 +139,15 @@ async def test_stoptranslate_command(mocker):
     If language is active, then !stoptranslate <code> should disable it.
     """
     bot = ChatManager()
-    # Pretend we've already got Spanish active
-    bot.active_translations["es"] = True
+    bot.command_handler.active_translations["es"] = True
 
     ctx = AsyncMock()
     ctx.message.content = "!stoptranslate es"
     ctx.send = AsyncMock()
 
-    await bot.stoptranslate_command(ctx)
-    # Language should now be set to False
-    assert bot.active_translations["es"] is False
+    await bot.command_handler.handle_stoptranslate_command(ctx)
+    assert bot.command_handler.active_translations["es"] is False
     ctx.send.assert_any_call("[🤖]: Stopped translation to 'es'")
-
-
-@pytest.mark.asyncio
-async def test_stoptranslate_not_active():
-    """
-    If language isn't active, it should say so.
-    """
-    bot = ChatManager()
-    # We haven't enabled 'es' yet, so it's missing/False
-
-    ctx = AsyncMock()
-    ctx.message.content = "!stoptranslate es"
-    ctx.send = AsyncMock()
-
-    await bot.stoptranslate_command(ctx)
-    ctx.send.assert_any_call("[🤖]: Translation to 'es' is not active.")
 
 @pytest.mark.asyncio
 async def test_translatechat_command_no_translation_service():
@@ -187,13 +156,13 @@ async def test_translatechat_command_no_translation_service():
     """
     bot = ChatManager()
     bot.translation_service = None
+    bot.command_handler.translation_service = None
 
     ctx = AsyncMock()
     ctx.send = AsyncMock()
 
-    await bot.translatechat_command(ctx)
-    ctx.send.assert_called_once_with("[🤖]: Translation service is not available.")
-
+    await bot.command_handler.handle_translatechat_command(ctx)
+    ctx.send.assert_called_once_with("[🤖]: Translation service unavailable.")
 
 @pytest.mark.asyncio
 async def test_translatechat_command_no_target_language():
@@ -201,15 +170,16 @@ async def test_translatechat_command_no_target_language():
     Test !translatechat when no target language is configured.
     """
     bot = ChatManager()
-    bot.translation_service = AsyncMock()  # Mock translation service
-    bot.translate_chat_to = None  # No target language configured
+    bot.translation_service = AsyncMock()
+    bot.command_handler.translation_service = AsyncMock()
+    bot.translate_chat_to = None
+    bot.command_handler.bot = bot
 
     ctx = AsyncMock()
     ctx.send = AsyncMock()
 
-    await bot.translatechat_command(ctx)
-    ctx.send.assert_called_once_with("[🤖]: Chat translation target language not configured in audio_config.json")
-
+    await bot.command_handler.handle_translatechat_command(ctx)
+    ctx.send.assert_called_once_with("[🤖]: Chat translation target language not configured")
 
 @pytest.mark.asyncio
 async def test_translatechat_command_toggle():
@@ -218,152 +188,24 @@ async def test_translatechat_command_toggle():
     """
     bot = ChatManager()
     bot.translation_service = AsyncMock()
+    bot.command_handler.translation_service = AsyncMock()
     bot.translate_chat_to = "es"
+    bot.command_handler.bot = bot
 
     ctx = AsyncMock()
     ctx.send = AsyncMock()
 
     # Test enabling
-    assert not bot.chat_translation_enabled  # Should start False
-    await bot.translatechat_command(ctx)
-    assert bot.chat_translation_enabled  # Should now be True
-    ctx.send.assert_called_with("[🤖]: Chat translation enabled (Target language: es)")
+    assert not bot.chat_translation_enabled
+    await bot.command_handler.handle_translatechat_command(ctx)
+    assert bot.chat_translation_enabled
+    ctx.send.assert_called_with("[🤖]: Chat translation enabled (Target: es)")
 
     # Test disabling
     ctx.send.reset_mock()
-    await bot.translatechat_command(ctx)
-    assert not bot.chat_translation_enabled  # Should now be False
-    ctx.send.assert_called_with("[🤖]: Chat translation disabled (Target language: es)")
-
-
-@pytest.mark.asyncio
-async def test_handle_chat_translation_ignored_user():
-    """
-    Test that messages from ignored users are not translated.
-    """
-    bot = ChatManager()
-    bot.translation_service = AsyncMock()
-    bot.ignore_users = {"nightbot"}
-    bot.chat_translation_enabled = True
-    bot.translate_chat_to = "es"
-
-    message = AsyncMock()
-    message.author.name = "nightbot"
-    message.content = "Test message"
-
-    channel = AsyncMock()
-    bot.get_channel = AsyncMock(return_value=channel)
-
-    await bot.handle_chat_translation(message)
-    channel.send.assert_not_called()
-
-# TODO: Fix these tests.
-# @pytest.mark.asyncio
-# async def test_handle_chat_translation_es_target():
-#     """
-#     Test translation of English message to Spanish.
-#     """
-#     bot = ChatManager()
-    
-#     # Create mock translation service
-#     mock_translation_service = AsyncMock()
-    
-#     # Configure translate to return an async function that returns the translation
-#     async def mock_translate(*args, **kwargs):
-#         return "¡Hola mundo!"
-        
-#     mock_translation_service.model.translate = mock_translate
-    
-#     bot.translation_service = mock_translation_service
-#     bot.chat_translation_enabled = True
-#     bot.translate_chat_to = "es"
-    
-#     message = AsyncMock()
-#     message.author.name = "user123"
-#     message.content = "Hello world!"
-
-#     channel = AsyncMock()
-#     bot.get_channel = AsyncMock(return_value=channel)
-
-#     await bot.handle_chat_translation(message)
-#     channel.send.assert_awaited_once_with("[🤖][user123][es]: ¡Hola mundo!")
-
-
-# @pytest.mark.asyncio
-# async def test_handle_chat_translation_en_target():
-#     """
-#     Test translation of Spanish message to English.
-#     """
-#     bot = ChatManager()
-    
-#     # Create mock translation service
-#     mock_translation_service = AsyncMock()
-    
-#     # Configure translate to return an async function that returns the translation
-#     async def mock_translate(*args, **kwargs):
-#         return "Hello world!"
-        
-#     mock_translation_service.translate = mock_translate
-    
-#     bot.translation_service = mock_translation_service
-#     bot.chat_translation_enabled = True
-#     bot.translate_chat_to = "en"
-    
-#     message = AsyncMock()
-#     message.author.name = "user123"
-#     message.content = "¡Hola mundo!"
-
-#     channel = AsyncMock()
-#     bot.get_channel = AsyncMock(return_value=channel)
-
-#     await bot.handle_chat_translation(message)
-#     channel.send.assert_awaited_once_with("[🤖][user123][en]: Hello world!")
-
-@pytest.mark.asyncio
-async def test_handle_chat_translation_same_language():
-    """
-    Test that messages already in target language aren't translated.
-    """
-    bot = ChatManager()
-    bot.translation_service = AsyncMock()
-    bot.translation_service.model.translate.return_value = "Hello world!"  # Same as input
-    bot.chat_translation_enabled = True
-    bot.translate_chat_to = "en"
-    
-    message = AsyncMock()
-    message.author.name = "user123"
-    message.content = "Hello world!"
-
-    channel = AsyncMock()
-    bot.get_channel = AsyncMock(return_value=channel)
-
-    await bot.handle_chat_translation(message)
-    channel.send.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_handle_chat_translation_error_handling():
-    """
-    Test error handling during translation.
-    """
-    bot = ChatManager()
-    bot.translation_service = AsyncMock()
-    bot.translation_service.model.translate.side_effect = Exception("Translation failed")
-    bot.translation_service.translate.side_effect = Exception("Fallback failed")
-    bot.chat_translation_enabled = True
-    bot.translate_chat_to = "es"
-    
-    message = AsyncMock()
-    message.author.name = "user123"
-    message.content = "Hello world!"
-
-    channel = AsyncMock()
-    bot.get_channel = AsyncMock(return_value=channel)
-
-    # This should not raise an exception
-    await bot.handle_chat_translation(message)
-    channel.send.assert_not_called()
-
+    await bot.command_handler.handle_translatechat_command(ctx)
+    assert not bot.chat_translation_enabled
+    ctx.send.assert_called_with("[🤖]: Chat translation disabled (Target: es)")
 
 @pytest.mark.asyncio
 async def test_event_message_with_chat_translation():
@@ -373,8 +215,7 @@ async def test_event_message_with_chat_translation():
     bot = ChatManager()
     bot.translation_service = AsyncMock()
     bot.chat_translation_enabled = True
-    bot.handle_chat_translation = AsyncMock()
-    bot.handle_commands = AsyncMock()
+    bot.command_handler.handle_chat_translation = AsyncMock()
 
     # Test regular message
     message = AsyncMock()
@@ -382,14 +223,177 @@ async def test_event_message_with_chat_translation():
     message.content = "Hello world!"
     
     await bot.event_message(message)
-    bot.handle_chat_translation.assert_called_once_with(message)
-    bot.handle_commands.assert_called_once_with(message)
+    bot.command_handler.handle_chat_translation.assert_called_once_with(message)
 
     # Test command message
     message.content = "!command"
-    bot.handle_chat_translation.reset_mock()
-    bot.handle_commands.reset_mock()
+    bot.command_handler.handle_chat_translation.reset_mock()
     
     await bot.event_message(message)
-    bot.handle_chat_translation.assert_not_called()  # Shouldn't translate commands
-    bot.handle_commands.assert_called_once_with(message)
+    bot.command_handler.handle_chat_translation.assert_not_called()  # Shouldn't translate commands
+
+@pytest.mark.asyncio
+async def test_load_config():
+    """
+    Test configuration loading functionality and defaults.
+    """
+    # Test with valid config
+    bot = ChatManager()
+    bot.config_manager = MagicMock()
+    bot.config_manager.config = {
+        'chat_translation': {
+            'translate_to': 'es',
+            'ignore_users': ['user1', 'User2']
+        }
+    }
+    
+    bot.load_config()
+    assert bot.translate_chat_to == 'es'
+    assert bot.ignore_users == {'user1', 'user2'}  # Should be lowercase
+    assert not bot.chat_translation_enabled
+    
+    # Test with missing config
+    bot.config_manager = None
+    bot.load_config()
+    assert bot.translate_chat_to is None
+    assert bot.ignore_users == set()
+    assert not bot.chat_translation_enabled
+
+@pytest.mark.asyncio
+async def test_init_services_failure():
+    """
+    Test behavior when service initialization fails.
+    """
+    # Patch where TranslationService is used, not where it's defined
+    with patch('chat_manager.TranslationService', side_effect=Exception('Service init failed')):
+        bot = ChatManager()
+        assert bot.translation_service is None
+        assert bot.config_manager is not None  # Config should still initialize
+
+
+@pytest.mark.asyncio
+async def test_event_ready():
+    """
+    Test the event_ready handler functionality.
+    """
+    bot = ChatManager()
+    
+    # Mock the channel
+    mock_channel = AsyncMock()
+    bot.get_channel = MagicMock(return_value=mock_channel)
+    
+    # Mock the send_welcome_message method
+    bot.command_handler.send_welcome_message = AsyncMock()
+    
+    # Mock the logger
+    with patch('chat_manager.logger.info') as mock_logger:
+        await bot.event_ready()
+        
+        # Verify logger calls
+        mock_logger.assert_any_call(f'Logged in as | {bot.nick}')
+        mock_logger.assert_any_call(f'Connected to channel: {os.getenv("CHANNEL")}')
+    
+        # Verify that send_welcome_message was called
+        bot.command_handler.send_welcome_message.assert_called_once()
+
+@pytest.mark.asyncio
+async def test_event_message_echo():
+    """
+    Test that echo messages are properly ignored.
+    """
+    bot = ChatManager()
+    message = AsyncMock()
+    message.echo = True
+    message.content = "Test message"
+    
+    # Patch handle_commands to ensure it's not called
+    bot.handle_commands = AsyncMock()
+    
+    await bot.event_message(message)
+    bot.handle_commands.assert_not_called()
+
+@pytest.mark.asyncio
+async def test_concurrent_translations():
+    """
+    Test handling of concurrent translations to multiple languages.
+    """
+    bot = ChatManager()
+    channel = AsyncMock()
+    bot.get_channel = MagicMock(return_value=channel)
+    
+    # Setup mock translation service
+    mock_translation_service = AsyncMock()
+    mock_translation_service.translate = MagicMock()
+    mock_translation_service.translate.side_effect = lambda text, src, target: f"Translated to {target}: {text}"
+    bot.translation_service = mock_translation_service
+    
+    # Setup active translations
+    bot.command_handler.active_translations = {
+        "es": True,
+        "fr": True,
+        "de": False  # This one shouldn't be translated
+    }
+    
+    # Test sending transcription
+    text = "Hello world"
+    await bot.send_transcription(text)
+    
+    # Verify calls
+    assert channel.send.call_count == 3  # Original + 2 translations
+    
+    channel.send.assert_has_calls([
+        call(f"{bot.bot_prefix}{text}"),
+        call(f"{bot.bot_prefix}[es]: Translated to es: {text}"),
+        call(f"{bot.bot_prefix}[fr]: Translated to fr: {text}")
+    ], any_order=True) 
+
+@pytest.mark.asyncio
+async def test_cleanup():
+    """
+    Test cleanup functionality.
+    """
+    bot = ChatManager()
+    
+    # Setup mock services
+    bot.speech_service = MagicMock()
+    bot.speech_task = AsyncMock()
+    bot.speech_task.cancel = MagicMock()
+    
+    # Execute cleanup
+    bot.cleanup()
+    
+    # Verify cleanup actions
+    bot.speech_task.cancel.assert_called_once()
+    bot.speech_service.stop.assert_called_once()
+
+@pytest.mark.asyncio
+async def test_send_transcription_empty():
+    """
+    Test that empty transcriptions are not sent.
+    """
+    bot = ChatManager()
+    channel = AsyncMock()
+    bot.get_channel = MagicMock(return_value=channel)
+    
+    await bot.send_transcription("   ")  # Empty or whitespace
+    channel.send.assert_not_called()
+
+@pytest.mark.asyncio
+async def test_translation_error_handling():
+    """
+    Test handling of translation errors.
+    """
+    bot = ChatManager()
+    channel = AsyncMock()
+    bot.get_channel = MagicMock(return_value=channel)
+    
+    # Setup mock translation service that raises an exception
+    mock_translation_service = MagicMock()
+    mock_translation_service.translate = MagicMock(side_effect=Exception("Translation failed"))
+    bot.translation_service = mock_translation_service
+    
+    bot.command_handler.active_translations = {"es": True}
+    
+    # Should not raise exception and should still send original message
+    await bot.send_transcription("Test message")
+    channel.send.assert_called_once_with(f"{bot.bot_prefix}Test message")

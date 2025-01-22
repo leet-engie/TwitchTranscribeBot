@@ -8,7 +8,7 @@ from typing import Optional, Dict
 from dotenv import load_dotenv
 from translation_service import TranslationService
 from config_manager import ConfigManager
-from command_handlers import CommandHandler
+from command_handler import CommandHandler
 from speech_service import SpeechService
 
 # Load environment variables
